@@ -69,7 +69,7 @@ const resnetModelDefine: ModelDefineType = async (data: ImageDataset, args: Mode
     model = ResNet50(
       boa.kwargs({
         include_top: false,
-        weights: 'none',
+        weights: null,
         input_shape: inputShape
       })
     );
@@ -121,12 +121,8 @@ const resnetModelDefine: ModelDefineType = async (data: ImageDataset, args: Mode
     model,
     metrics: metrics,
     predict: async function (inputData: ImageSample) {
-      let image = tf.io.read_file(inputData.data);
-      image = tf.image.decode_jpeg(image, boa.kwargs({
-        channels: 3
-      }));
-      const shape = tf.shape(image).numpy();
-      return this.model.predict(tf.reshape(image, [ 1 ].concat(...shape.slice(0, 3)))).toString();
+      const shape = tf.shape(inputData.data).numpy();
+      return this.model.predict(tf.reshape(inputData.data, [ 1 ].concat(...shape.slice(0, 3)))).toString();
     }
   };
   return result;
