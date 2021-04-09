@@ -1,98 +1,48 @@
-/**
- * @file This plugin is used to load the mobileNet for image classification. The input layer is modified to fit into any shape of input.
- * The final layer is changed to a softmax layer to match the output shape
- */
-
-import { ModelDefineType, ImageDataset, ImageSample, ModelDefineArgsType, UniModel, download, constants } from '@pipcook/pipcook-core';
-import * as assert from 'assert';
-import * as fs from 'fs-extra';
+import { ImageDatasetMeta, Runtime, ScriptContext } from '@pipcook/core';
+// @ts-ignore
+import download from 'pipcook-downloader';
 import * as path from 'path';
-
-const boa = require('@pipcook/boa');
-const tf = boa.import('tensorflow');
-const { Adam } = boa.import('tensorflow.keras.optimizers');
-const { ResNet50 } = boa.import('tensorflow.keras.applications.resnet50');
-const { GlobalAveragePooling2D, Dropout, Dense } = boa.import('tensorflow.keras.layers');
-const { Model } = boa.import('tensorflow.keras.models');
+import '@tensorflow/tfjs-backend-cpu';
 
 const MODEL_WEIGHTS_NAME = 'resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5';
 const MODEL_URL =
   `http://ai-sample.oss-cn-hangzhou.aliyuncs.com/pipcook/models/resnet50_python/${MODEL_WEIGHTS_NAME}`;
-const MODEL_PATH = path.join(constants.KERAS_DIR, 'models', MODEL_WEIGHTS_NAME);
 
-/** @ignore
- * assertion test
- * @param data
- */
-const assertionTest = (data: ImageDataset) => {
-  assert.ok(data.metadata.feature, 'Image feature is missing');
-  assert.ok(data.metadata.feature.shape.length === 3, 'The size of an image must be 3d');
-};
-
-/**
- *  main function of the operator: load the mobilenet model
- * @param data sample data
- */
-const resnetModelDefine: ModelDefineType = async (data: ImageDataset, args: ModelDefineArgsType): Promise<UniModel> => {
+const defineModel = async (boa: any, options: Record<string, any>, path: string, inputShape: number[], outputShape: number) => {
   let {
     loss = 'categorical_crossentropy',
     metrics = [ 'accuracy' ],
     learningRate = 0.001,
     decay = 0.05,
-    recoverPath,
-    labelMap,
     freeze = false
-  } = args;
+  } = options;
 
-  let inputShape: number[];
-  let outputShape: number;
+  const { Adam } = boa.import('tensorflow.keras.optimizers');
+  const { ResNet50 } = boa.import('tensorflow.keras.applications.resnet50');
+  const { GlobalAveragePooling2D, Dropout, Dense } = boa.import('tensorflow.keras.layers');
+  const { Model } = boa.import('tensorflow.keras.models');
 
-  if (!recoverPath) {
-    await data.trainLoader.next();
-    assertionTest(data);
-    inputShape = data.metadata.feature.shape;
-    outputShape = Object.keys(data.metadata.labelMap).length;
-    labelMap = data.metadata.labelMap;
-  } else {
-    const log = JSON.parse(fs.readFileSync(path.join(recoverPath, '..', 'metadata.json'), 'utf8'));
-    labelMap = JSON.parse(log.output.dataset).labelMap;
-    outputShape = Object.keys(labelMap).length;
-  }
+  await download(MODEL_URL, path);
 
-  let model: any;
-
-  if (!await fs.pathExists(MODEL_PATH)) {
-    await download(MODEL_URL, MODEL_PATH);
-  }
-
-  if (recoverPath) {
-    model = ResNet50(
-      boa.kwargs({
-        include_top: false,
-        weights: null,
-        input_shape: inputShape
-      })
-    );
-  } else {
-    model = ResNet50(
-      boa.kwargs({
-        include_top: false,
-        weights: 'imagenet',
-        input_shape: inputShape
-      })
-    );
-  }
+  let model = ResNet50(
+    boa.kwargs({
+      include_top: false,
+      weights: 'imagenet',
+      input_shape: inputShape
+    })
+  );
 
   let output = model.output;
   output = GlobalAveragePooling2D()(output);
   output = Dense(1024, boa.kwargs({
     activation: 'relu'
   }))(output);
-  output = Dropout(0.5)(output);
+  output = Dropout(.5)(output);
 
   const outputs = Dense(outputShape, boa.kwargs({
     activation: 'softmax'
   }))(output);
+
   model = Model(boa.kwargs({
     inputs: model.input,
     outputs: outputs
@@ -104,10 +54,6 @@ const resnetModelDefine: ModelDefineType = async (data: ImageDataset, args: Mode
     }
   }
 
-  if (recoverPath) {
-    model.load_weights(path.join(recoverPath, 'weights.h5'));
-  }
-
   model.compile(boa.kwargs({
     optimizer: Adam(boa.kwargs({
       lr: learningRate,
@@ -117,15 +63,54 @@ const resnetModelDefine: ModelDefineType = async (data: ImageDataset, args: Mode
     metrics: metrics
   }));
 
-  const result: UniModel = {
-    model,
-    metrics: metrics,
-    predict: async function (inputData: ImageSample) {
-      const shape = tf.shape(inputData.data).numpy();
-      return this.model.predict(tf.reshape(inputData.data, [ 1 ].concat(...shape.slice(0, 3)))).toString();
-    }
-  };
-  return result;
-};
+  return model;
+}
 
-export default resnetModelDefine;
+const trainModel = async (tf: any, options: Record<string, any>, model: any, outputShape: number, api: Runtime<any, ImageDatasetMeta>) => {
+  const {
+    epochs = 1,
+    batchSize = 16
+  } = options;
+  // @ts-ignore
+  const meta = await api.dataSource.getDataSourceMeta();
+  const trainLength = meta.size.train;
+  const batchesPerEpoch = Math.floor(trainLength / batchSize);
+  
+  for (let i = 0; i < epochs; i++) {
+    console.log(`Epoch ${i}/${epochs} start`);
+    for (let j = 0; j < batchesPerEpoch; j++) {
+      const dataBatch = await api.dataSource.train.nextBatch(batchSize);
+      let xs = dataBatch.map((it => it.data));
+      let ys = dataBatch.map((it => it.label));
+      const xShapes = xs.map(it => it.shape);
+      xs = await Promise.all(xs.map((it) => it.data()));
+      xs = xs.map((it, idx) => tf.reshape(tf.convert_to_tensor(Array.from(it)), xShapes[idx]));
+      ys = tf.one_hot(ys, outputShape);
+      xs = tf.stack(xs);
+      ys = tf.stack(ys);
+      const trainRes = model.train_on_batch(xs, ys);
+      if (j % (batchesPerEpoch / 10) == 0) {
+        console.log(`Iteration ${i}/${j} result --- loss: ${trainRes[0]} accuracy: ${trainRes[1]}`);
+      }
+    }
+  }
+
+}
+
+const main = async(api: Runtime<any, ImageDatasetMeta>, options: Record<string, any>, context: ScriptContext) => {
+  const { boa, workspace } = context;
+  const MODEL_PATH = path.join(workspace.cacheDir, MODEL_WEIGHTS_NAME);
+  const tf = boa.import('tensorflow');
+  // @ts-ignore
+  const meta = await api.dataSource.getDataSourceMeta();
+
+  const outputShape = meta.labelMap.length;
+  const inputShape = [ parseInt(meta.dimension.x), parseInt(meta.dimension.y), meta.dimension.z ];
+
+  const model = await defineModel(boa, options, MODEL_PATH, inputShape, outputShape);
+  await trainModel(tf, options, model, outputShape, api);
+  console.log('start saving')
+  model.save(path.join(context.workspace.modelDir, 'model.h5'));
+}
+
+export default main;
