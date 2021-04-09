@@ -77,8 +77,6 @@ const trainModel = async (tf: any, options: Record<string, any>, model: any, out
   const batchesPerEpoch = Math.floor(trainLength / batchSize);
   
   for (let i = 0; i < epochs; i++) {
-    api.dataSource.train.shuffle();
-    api.dataSource.train.seek(0);
     console.log(`Epoch ${i}/${epochs} start`);
     for (let j = 0; j < batchesPerEpoch; j++) {
       const dataBatch = await api.dataSource.train.nextBatch(batchSize);
